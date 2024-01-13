@@ -1,1 +1,12 @@
 # ML_Classification_Haiti_Disaster_Relief_Project
+
+# Metadata
+Name: Victor Teelucksingh
+
+# Project Description (Please see included HTML or PDF for full report including data description, EDA, modeling, and results analysis)
+The goal of this project is to use various classification methods to solve a real historical data-mining problem: locating displaced persons living in makeshift shelters following the destruction of the earthquake in Haiti in 2010. We want to determine an optimal statistical method to as accurately as possible, and in as timely a manner as possible, locate as many of the displaced persons so that they can be provided food and water before their situations become unsurvivable.
+
+The provided training data consists of 63,241 observations representing the RGB values for pixels produced from high-resolution, geo-referenced imagery data collected by aircraft by the Rochester Institute of Technology during the relief efforts. Each pixel has a classification of Blue Tarp, Rooftop, Soil, Various Non-Tarp, and Vegetation based on the combination of the intensity of the Red, Green, and Blue values.Displaced persons were using blue tarps to create makeshift shelters during the disaster, so blue tarps were identified as good indicators of where the displaced persons were. Given this context, we are most concerned with determining whether given RGB values can identify a potential blue tarp pixel or not (i.e., binary classification). We will train models to predict if a pixel/location indicates a blue tarp, which could assist the relief volunteers in finding the displaced persons. We will be working with logistic regression, LDA, QDA, KNN, and penalized logistic models to identify the best model to solve our problem.
+
+As we build these models, we will need to choose tuning parameters and thresholds that best optimize our goals in this context. We will document the performance of these models using 10-fold cross-validation.
+We will likely focus on optimizing for sensitivity and minimizing the false negative rate (FNR) because we are dealing with human life. Although, we will need to make some consideration to minimize the false positive rate (FPR) because we want to efficiently use our critical and limited relief resources (mostly military/volunteer support). Additionally, we want to maximize F1 score, which is a useful metric when considering imbalanced classification (blue tarps are much more rare than non-blue tarp pixels).
