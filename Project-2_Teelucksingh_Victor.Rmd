@@ -1,0 +1,1266 @@
+---
+title: "Disaster Relief Project (Part 2)_updated"
+author: "Victor Teelucksingh - vat5jy - 8-7-2023"
+output: html_document
+editor_options: 
+  markdown: 
+    wrap: sentence
+---
+
+<!--- Below are global settings for knitr. You can override any of them by adding the changes to individual chunks --->
+
+```{r global_options, include=FALSE, echo=FALSE, message=FALSE, results=FALSE}
+knitr::opts_chunk$set(error=TRUE,        # Keep compiling upon error
+                      collapse=FALSE,    # collapse by default
+                      echo=TRUE,         # echo code by default
+                      comment = "#>",    # change comment character
+                      fig.width = 5.5,     # set figure width
+                      fig.align = "center",# set figure position
+                      out.width = "49%", # set width of displayed images
+                      warning=FALSE,     # do not show R warnings
+                      message=FALSE)     # do not show R messages
+
+knitr::opts_knit$set(root.dir = "C:/Users/victo/OneDrive/Documents/MSDS/Summer 2023/DS 6030 (Statistical Learning)/Project 2")
+```
+
+<!--- Change font size for headers --->
+
+```{=html}
+<style>
+h1.title { font-size: 28px; }
+h1 { font-size: 22px; }
+h2 { font-size: 18px; }
+h3 { font-size: 14px; }
+</style>
+```
+**DS 6030 \| Summer 2023 \| University of Virginia** **Victor Teelucksingh - vat5jy - 8/7/2023**
+
+# Section 1: Introduction
+
+### 1.0: Project Description
+
+The goal of this project is to use the classification methods covered in this course to solve a real historical data-mining problem: locating displaced persons living in makeshift shelters following the destruction of the earthquake in Haiti in 2010. We want to determine an optimal statistical method to as accurately as possible, and in as timely a manner as possible, locate as many of the displaced persons so that they can be provided food and water before their situations become unsurvivable.
+
+The provided training data consists of 63,241 observations representing the RGB values for pixels produced from high-resolution, geo-referenced imagery data collected by aircraft by the Rochester Institute of Technology during the relief efforts. Each pixel has a classification of Blue Tarp, Rooftop, Soil, Various Non-Tarp, and Vegetation based on the combination of the intensity of the Red, Green, and Blue values.Displaced persons were using blue tarps to create makeshift shelters during the disaster, so blue tarps were identified as good indicators of where the displaced persons were. Given this context, we are most concerned with determining whether given RGB values can identify a potential blue tarp pixel or not (i.e., binary classification). We will train models to predict if a pixel/location indicates a blue tarp, which could assist the relief volunteers in finding the displaced persons. We will be working with logistic regression, LDA, QDA, KNN, and penalized logistic models to identify the best model to solve our problem.
+
+As we build these models, we will need to choose tuning parameters and thresholds that best optimize our goals in this context. We will document the performance of these models using 10-fold cross-validation.
+We will likely focus on optimizing for sensitivity and minimizing the false negative rate (FNR) because we are dealing with human life. Although, we will need to make some consideration to minimize the false positive rate (FPR) because we want to efficiently use our critical and limited relief resources (mostly military/volunteer support). Additionally, we want to maximize F1 score, which is a useful metric when considering imbalanced classification (blue tarps are much more rare than non-blue tarp pixels). We discuss in more detail in the following sections.
+
+# Section 2: Initial Data Wrangling and EDA (Training and Holdout data)
+
+### 2.0: Load libraries, load data, develop exploratory graphs
+
+```{r, warning=FALSE, echo=FALSE, include=FALSE}
+#Call libraries
+library(tidyverse)
+library(plotly)
+library(caret)
+library(knitr)
+library(kableExtra)
+library(pROC)
+library(tictoc)
+library(MLmetrics)
+```
+
+```{r, warning=FALSE, echo=FALSE, include=FALSE}
+#Call libraries
+library(ggplot2)
+```
+
+```{r,  warning=FALSE, echo=FALSE, include=FALSE}
+library(gridExtra)
+```
+
+
+```{r, echo=FALSE}
+# Determine number of cores and initialize cluster
+library(parallel)
+library(doParallel)
+no_cores <- detectCores() - 12
+cl <- makePSOCKcluster(no_cores)
+registerDoParallel(cl)
+```
+
+```{r, include=FALSE, echo=FALSE}
+#setwd('C:/Users/victo/OneDrive/Documents/MSDS/Summer 2023/DS 6030 (Statistical Learning)/Project 2')
+```
+
+We call libraries assist in our analysis for EDA (tidyverse, plotly, ggplot2, gridExtra), model building (caret), and summarizing results (knitr, kableExtra, pROC, MLmetrics).
+
+```{r, echo=FALSE}
+#Load in data
+Haiti <- read.csv('HaitiPixels.csv')
+```
+
+```{r, echo=FALSE}
+#EDA
+mytab<-table(Haiti$Class)
+prop.table(mytab)*100
+```
+We examine the proportions of each class in the training data. We will use this to build a bar chart.
+```{r, echo=FALSE}
+newData<-Haiti%>%
+  group_by(Class)%>%
+  summarize(Counts=n())%>%
+  mutate(Percent=Counts/nrow(Haiti))
+
+ggplot(newData, aes(x=Class, y=Percent))+
+geom_bar(stat="identity")+
+theme(axis.text.x = element_text(angle = 90),
+plot.title = element_text(hjust = 0.5))+
+labs(x="Class", y="Percent of Observations", title="Dist of Class in Training Data")
+```
+
+The proportion table and corresponding bar chart above give us a better idea of the distribution of the classifications in the data. We can see that Vegetation and Soil are the most common classes and Blue Tarp is the least common class. If we consider a binary classification where we consider Blue Tarp (Yes/No), we will likely have imbalanced classes during our model fitting and analysis of results. We will need to take that into consideration when deciding which statistics we should rely on for determining model thresholds and tuning parameters.
+
+```{r, echo=FALSE}
+df <- Haiti %>% group_by(Class) %>% 
+  summarise(mean_red=mean(Red),
+            mean_green= mean(Green),
+            mean_blue = mean(Blue),
+            .groups = 'drop') %>%
+  as.data.frame()
+df
+```
+
+We find the mean RGB values across classes to better understand the distribution of RGB values.
+
+```{r, echo=FALSE}
+min_vals <- c(min(Haiti$Red),min(Haiti$Green),min(Haiti$Blue))
+max_vals <- c(max(Haiti$Red),max(Haiti$Green),max(Haiti$Blue))
+my_labels <- c("Red", "Green", "Blue")
+vals_df <- data.frame(my_labels, min_vals,max_vals)
+knitr::kable(vals_df, "pipe", col.name=c("color","min_vals", "max_vals"), align=c("c","c"), caption="Min/Max RGB Values in Training Data")
+```
+
+We validated that our RGB values fall within the expected range (0 - 255) using min and max values for each RGB field.
+
+```{r, echo=FALSE}
+fig <- plot_ly(Haiti, x = ~Red, y = ~Green, z = ~Blue, color = ~Class, colors = c('#AABACD', '#C3B8A3', '#F8E3B1', '#B9A98D', '#4F4E3D'), width = 700, height = 700)
+fig <- fig %>% add_markers()
+fig <- fig %>% layout(scene = list(xaxis = list(title = 'Red'),
+                     yaxis = list(title = 'Green'),
+                     zaxis = list(title = 'Blue')))
+
+fig
+```
+
+I found the average intensity for the Red, Green, Blue values for each class. I converted the average RGB values into the corresponding hex color codes using an online converter to get better visual context on a colored representation for each class as it might appear on the geo-referenced imagery data. I used the hex codes to distinguish each class in a 3d plot of the observations to visualize the distribution of the classes. Although interesting, this scatterplot may be difficult to interpret, so we will create box plots below to more easily visualize the distribution of classes in the both the training and holdout data.
+
+### 2.1: Load and clean holdout data. Compare with training data.
+
+We load the data files to create the holdout set. I opened each file in a text editor to review the column names (if any) and delimiters, and to determine if any metadata rows should be skipped. 'orthovnir067_ROI_Blue_Tarps_data' is just the same dataset as 'orthovnir067_ROI_Blue_Tarps' but with fewer fields, so we can ignore this file.
+
+```{r, warnings=FALSE, message=FALSE, echo=FALSE, include=FALSE}
+#setwd('C:/Users/victo/OneDrive/Documents/MSDS/Summer 2023/DS 6030 (Statistical Learning)/Project 2/Hold Out Data')
+ROI_057_NON_Blue_Tarps <- read.csv("orthovnir057_ROI_NON_Blue_Tarps.txt", skip = 8, sep="", header=FALSE)
+ROI_067_Blue_Tarps <- read.csv("orthovnir067_ROI_Blue_Tarps.txt", skip = 8, sep="", header=FALSE)
+ROI_067_NOT_Blue_Tarps <- read.csv("orthovnir067_ROI_NOT_Blue_Tarps.txt", skip = 8, sep="", header=FALSE)
+ROI_069_Blue_Tarps <- read.csv("orthovnir069_ROI_Blue_Tarps.txt", skip = 8, sep="", header=FALSE)
+ROI_069_NOT_Blue_Tarps <- read.csv("orthovnir069_ROI_NOT_Blue_Tarps.txt", skip = 8, sep="", header=FALSE)
+ROI_078_Blue_Tarps <- read.csv("orthovnir078_ROI_Blue_Tarps.txt", skip = 8, sep="", header=FALSE)
+ROI_078_NON_Blue_Tarps <- read.csv("orthovnir078_ROI_NON_Blue_Tarps.txt", skip = 8, sep="", header=FALSE)
+```
+
+We need to determine which fields align with our expected RGB values. Per the below tables, we examined the mean for each RGB column in the Blue Tarp data. Column 10 has the highest mean for each of the Blue Tarp datasets, so we will consider this the blue pixel field. We see that for the non blue tarp datasets that the first column has the highest mean across the board. When comparing to the mean of the RGB values for the non blue tarp class in the training data in the table above, we see that the mean value for red is greater than the mean value for both blue and green, so we will consider column 8 as the red pixel field. By process of elimination we will assign column 9 as the green pixel field.
+
+```{r, echo=FALSE}
+Blue_Tarps_067<-c(mean(ROI_067_Blue_Tarps$V8),mean(ROI_067_Blue_Tarps$V9),mean(ROI_067_Blue_Tarps$V10))
+Blue_Tarps_069<-c(mean(ROI_069_Blue_Tarps$V8),mean(ROI_069_Blue_Tarps$V9),mean(ROI_069_Blue_Tarps$V10))
+Blue_Tarps_078<-c(mean(ROI_078_Blue_Tarps$V8),mean(ROI_078_Blue_Tarps$V9),mean(ROI_078_Blue_Tarps$V10))
+col_headers<-c("V8", "V9", "V10")
+Blue_Tarps_Means<-data.frame(col_headers,Blue_Tarps_067, Blue_Tarps_069, Blue_Tarps_078)
+knitr::kable(Blue_Tarps_Means, "pipe", align=c("c","c","c","c"), caption = "Column Means for Blue Tarp Data")
+```
+
+```{r, echo=FALSE, warnings=FALSE, message=FALSE}
+NON_Blue_Tarps_057 <- c(mean(ROI_057_NON_Blue_Tarps$V8),mean(ROI_057_NON_Blue_Tarps$V9),mean(ROI_057_NON_Blue_Tarps$V10))
+NOT_Blue_Tarps_067 <- c(mean(ROI_067_NOT_Blue_Tarps$V8),mean(ROI_067_NOT_Blue_Tarps$V9),mean(ROI_067_NOT_Blue_Tarps$V10))
+NOT_Blue_Tarps_069 <- c(mean(ROI_069_NOT_Blue_Tarps$V8),mean(ROI_069_NOT_Blue_Tarps$V9),mean(ROI_069_NOT_Blue_Tarps$V10))
+NON_Blue_Tarps_078 <- c(mean(ROI_078_NON_Blue_Tarps$V8),mean(ROI_078_NON_Blue_Tarps$V9),mean(ROI_078_NON_Blue_Tarps$V10))
+col_headers<-c("V8", "V9", "V10")
+NON_Blue_Tarps_Means<-data.frame(col_headers,NON_Blue_Tarps_057, NOT_Blue_Tarps_067, NOT_Blue_Tarps_069,NON_Blue_Tarps_078)
+knitr::kable(NON_Blue_Tarps_Means, "pipe", align=c("c","c","c","c"), caption = "Column Means for Non Blue Tarp Data")
+```
+
+We add back in the column headers to the holdout data. We also create a binary variable to classify whether a pixel is a blue tarp pixel or not. We are primarily interested in training models to identify blue tarp pixels, and are less interested in examining the specifics of pixels that aren't blue tarp, so a binary variable works for our purposes. We will build this binary variable in both the training and holdout data sets.
+
+```{r}
+#Add back in the column headers to each data set
+colnames(ROI_057_NON_Blue_Tarps) <- c("ID", "X","Y","Map X", "Map Y", "Lat", "Lon", "Red", "Green", "Blue")
+colnames(ROI_067_Blue_Tarps) <- c("ID", "X","Y","Map X", "Map Y", "Lat", "Lon", "Red", "Green", "Blue")
+colnames(ROI_067_NOT_Blue_Tarps) <- c("ID", "X","Y","Map X", "Map Y", "Lat", "Lon", "Red", "Green", "Blue")
+colnames(ROI_069_Blue_Tarps) <- c("ID", "X","Y","Map X", "Map Y", "Lat", "Lon", "Red", "Green", "Blue")
+colnames(ROI_069_NOT_Blue_Tarps) <- c("ID", "X","Y","Map X", "Map Y", "Lat", "Lon", "Red", "Green", "Blue")
+colnames(ROI_078_Blue_Tarps) <- c("ID", "X","Y","Map X", "Map Y", "Lat", "Lon", "Red", "Green", "Blue")
+colnames(ROI_078_NON_Blue_Tarps) <- c("ID", "X","Y","Map X", "Map Y", "Lat", "Lon", "Red", "Green", "Blue")
+```
+
+
+```{r}
+#Create binary variable (pixel classified as blue tarp or not)
+Haiti$is_Blue_Tarp <- Haiti$Class
+Haiti$is_Blue_Tarp[Haiti$is_Blue_Tarp!="Blue Tarp"] <- "No"
+Haiti$is_Blue_Tarp[Haiti$is_Blue_Tarp=="Blue Tarp"] <- "Yes"
+
+#Data format as factor
+Haiti$is_Blue_Tarp <- as.factor(Haiti$is_Blue_Tarp)
+```
+
+```{r}
+#Create binary variable (pixel classified as blue tarp or not) for each dataset
+ROI_057_NON_Blue_Tarps$is_Blue_Tarp <- "No"
+ROI_057_NON_Blue_Tarps$is_Blue_Tarp <- as.factor(ROI_057_NON_Blue_Tarps$is_Blue_Tarp)
+
+ROI_067_NOT_Blue_Tarps$is_Blue_Tarp <- "No"
+ROI_067_NOT_Blue_Tarps$is_Blue_Tarp <- as.factor(ROI_067_NOT_Blue_Tarps$is_Blue_Tarp)
+
+ROI_069_NOT_Blue_Tarps$is_Blue_Tarp <- "No"
+ROI_069_NOT_Blue_Tarps$is_Blue_Tarp <- as.factor(ROI_069_NOT_Blue_Tarps$is_Blue_Tarp)
+
+ROI_078_NON_Blue_Tarps$is_Blue_Tarp <- "No"
+ROI_078_NON_Blue_Tarps$is_Blue_Tarp <- as.factor(ROI_078_NON_Blue_Tarps$is_Blue_Tarp)
+
+ROI_067_Blue_Tarps$is_Blue_Tarp <- "Yes"
+ROI_067_Blue_Tarps$is_Blue_Tarp <- as.factor(ROI_067_Blue_Tarps$is_Blue_Tarp)
+
+ROI_069_Blue_Tarps$is_Blue_Tarp <- "Yes"
+ROI_069_Blue_Tarps$is_Blue_Tarp <- as.factor(ROI_069_Blue_Tarps$is_Blue_Tarp)
+
+ROI_078_Blue_Tarps$is_Blue_Tarp <- "Yes"
+ROI_078_Blue_Tarps$is_Blue_Tarp <- as.factor(ROI_078_Blue_Tarps$is_Blue_Tarp)
+```
+
+```{r, echo=FALSE}
+#Remove ID column before bind rows
+ROI_057_NON_Blue_Tarps <- ROI_057_NON_Blue_Tarps %>% select(-c(ID))
+ROI_067_NOT_Blue_Tarps <- ROI_067_NOT_Blue_Tarps %>% select(-c(ID))
+ROI_069_NOT_Blue_Tarps <- ROI_069_NOT_Blue_Tarps %>% select(-c(ID))
+ROI_078_NON_Blue_Tarps <- ROI_078_NON_Blue_Tarps %>% select(-c(ID))
+ROI_067_Blue_Tarps <- ROI_067_Blue_Tarps %>% select(-c(ID))
+ROI_069_Blue_Tarps <- ROI_069_Blue_Tarps %>% select(-c(ID))
+ROI_078_Blue_Tarps <- ROI_078_Blue_Tarps %>% select(-c(ID))
+```
+
+Combine cleaned holdout data into one dataframe.
+
+```{r}
+holdout_data <- rbind(ROI_057_NON_Blue_Tarps,ROI_067_NOT_Blue_Tarps,ROI_069_NOT_Blue_Tarps,ROI_078_NON_Blue_Tarps,
+                      ROI_067_Blue_Tarps, ROI_069_Blue_Tarps, ROI_078_Blue_Tarps)
+```
+
+Before training and testing, we will perform EDA to compare the distributions in the training and holdout data.
+
+```{r, echo=FALSE}
+#http://www.sthda.com/english/wiki/wiki.php?id_contents=7930#grid.arrange-create-and-arrange-multiple-plots
+red_boxplot_training <- ggplot(Haiti, aes(x=is_Blue_Tarp, y = Red)) + geom_boxplot() + ggtitle('Training-Red by Class')
+green_boxplot_training <- ggplot(Haiti, aes(x=is_Blue_Tarp, y = Green)) + geom_boxplot() + ggtitle('Training-Green by Class')
+blue_boxplot_training <- ggplot(Haiti, aes(x=is_Blue_Tarp, y = Blue)) + geom_boxplot() + ggtitle('Training-Blue by Class')
+
+red_boxplot_holdout <- ggplot(holdout_data, aes(x=is_Blue_Tarp, y = Red)) + geom_boxplot() + ggtitle('Holdout-Red by Class')
+green_boxplot_holdout <- ggplot(holdout_data, aes(x=is_Blue_Tarp, y = Green)) + geom_boxplot() + ggtitle('Holdout-Green by Class')
+blue_boxplot_holdout <- ggplot(holdout_data, aes(x=is_Blue_Tarp, y = Blue)) + geom_boxplot() + ggtitle('Holdout-Blue by Class')
+```
+
+```{r, echo=FALSE}
+grid.arrange(red_boxplot_training, green_boxplot_training, blue_boxplot_training,
+             red_boxplot_holdout, green_boxplot_holdout, blue_boxplot_holdout, ncol=3, nrow=2)
+```
+
+We see some differences in the distributions for each color between the training and holdout data. The training data has significantly higher intensity than the holdout for Red based on median for both the positive and negative class. Likewise, the negative class in the training data has a wider distribution of Red than the holdout data, which has red clustered around the 75-140 range for both positive and negative classes. 
+
+We see a similar trend for both Green and Blue where the training data generally has higher intensity values for both the positive and negative classes when compared to the holdout data. The negative class also has a wider distribution of Green and Blue in the training data.
+
+Generally both the training data and the holdout follow similar trends where the positive class has noticeably more blue and green than the negative class. However, the general intensity is higher for the training data across all colors than for the holdout data. The training data also has wider distributions of colors, particularly for the negative class. This may have an eventual impact during holdout testing because our models are trained to identify classes using higher intensities. I would expect that this would translate into an issue for our eventual test FNR because we may be failing to identify blue tarps in the test data simply because the color intensity is too low across the board. 
+
+# Section 3: Model Fitting, Tuning Parameter Selection, and Evaluation
+
+### 3.0: Set random seed & setup cross-validation folds
+
+```{r}
+#Data wrangling and set-up
+#References:
+
+# Set random seed to allow for reproducible results. 
+# The CV folds are not created during defining trainControl unless explicitly stated using the index argument. We can use the createMultiFolds() function to create our CV folds for repeated use.
+
+set.seed(1)
+
+myfolds <- createMultiFolds(y = Haiti$is_Blue_Tarp, k=10, times=1)
+
+# Specify type of training method used and the number of folds. In caret, we define the cross-validation using the trainControl function. In this case, we specify CV and use the folds we created above as the index.
+ctrlspecs <- trainControl(method="cv", 
+                          index=myfolds, 
+                          savePredictions=TRUE,
+                          classProbs=TRUE,
+                          summaryFunction = twoClassSummary)
+```
+
+We set a random seed to allow for reproducible results. We use create the CV folds for repeated use in each model.
+We used the createMultiFolds() function with 10 folds following generally accepted standards for cross-validation, and set times=1 to indicate no repetitions to limit calculation time in R. We then save our control specifications in the crtlspecs variable to be used in each model.
+[^1] [^2]
+
+[^1]: <https://stackoverflow.com/questions/52622811/does-using-the-same-traincontrol-object-for-cross-validation-when-training-multi>
+
+[^2]: <https://www.r-bloggers.com/2020/11/caretcreatefolds-vs-createmultifolds/>
+
+Each model family will follow the same formula:
+
+$$\begin{equation}
+\mathbf{is\_Blue\_Tarp} = RedX\_{1} + GreenX\_{2} + BlueX\_{3}
+\end{equation}$$
+
+Other than creating the binary is_Blue_Tarp variable, there was no additional pre-processing (e.g., scaling) for any of the models. The RGB values already have a defined scaling from 0-255. Transformations and interactions may not fit well given the context, as the predictors are simply numeric values identifying the intensity of RGB colors for a pixel (even if model results may indicate better performance using transformations or interactions, it's difficult to justify using those transformations in this context.) Because we do not train our models with transformations or interactions, no further pre-processing was needed per in-class discussions.
+
+### 3.1 Fit Logistic Model
+
+```{r}
+# Fit Logistic model
+glm.fit <- train(is_Blue_Tarp ~ Red + Green + Blue, data=Haiti, family="binomial", method="glm", trControl=ctrlspecs)
+
+summary(glm.fit)
+```
+
+```{r, echo=FALSE, include=FALSE}
+#Logistic Regression statistics across different thresholds using thresholder function from the caret package. Summarize in a table. 
+threshold.stats <- thresholder(glm.fit,
+                         threshold = seq(0.05, 0.95, by = 0.05),
+                         statistics = "all")
+
+threshold.stats$FNR <- 1 - threshold.stats$Sensitivity
+threshold.stats$FPR <- 1 - threshold.stats$Specificity
+
+threshold.stats %>% 
+  select("prob_threshold", "Accuracy", "Sensitivity", "FPR", "Precision", "FNR","F1", "Balanced Accuracy", "Dist", ) %>%
+  knitr::kable(digits=3) %>%
+  kableExtra::kable_styling(full_width=FALSE)
+```
+
+Per EDA, we know that we have unequal distribution of classes in our training data, so we are dealing with "imbalanced classification." In this case, classification accuracy is a less reliable statistic because high accuracy can be achieved by a model that simply predicts the majority class. One strategy for choosing an appropriate threshold in an imbalanced classification scenario is to use metrics that focus on one class, like sensitivity or specificity. Given the context, sensitivity may be a better statistic for deciding the appropriate threshold because it is concerned with how well the positive/minority class (is_Blue_Tarp = "Yes") is predicted. We are more concerned with limiting the FNR than we are the FPR because we want ensure we are not leaving anyone behind given we are dealing with preventing loss of human life.
+Although a higher FPR potentially means a decrease in efficiency with additional resources spent, we can reliably assume that this project is an iterative step in finding the displaced persons (i.e., this is a starting point where additional research will be made to confirm people are stranded at chosen locations). While we will focus on optimizing sensitivity and FNR, we will also consider F-1 score which is useful in imbalanced classification because it balances statistics using both the minority and majority classes. Our approach for choosing model thresholds will be to optimize F-1 and sensitivity while making some considerations to limit FPR.
+[^3] [^4] [^5]
+
+[^3]: <https://machinelearningmastery.com/tour-of-evaluation-metrics-for-imbalanced-classification/>
+
+[^4]: <https://towardsdatascience.com/optimal-threshold-for-imbalanced-classification-5884e870c293>
+
+[^5]: <https://neptune.ai/blog/balanced-accuracy>
+
+**For this logistic model, we chose a threshold of .65 to maximize F1 while still maintaining high sensitivity / low FNR. We also chose this threshold to consider having a lower FPR to better utilize relief resources.**
+
+```{r, echo=FALSE}
+pred <- predict(glm.fit, Haiti, type='prob')
+predob <- ROCR::prediction(pred$Yes, Haiti$is_Blue_Tarp, label.ordering=c('No', 'Yes'))
+model.roc <- ROCR::performance(predob, measure='tpr', x.measure='fpr')
+plot(model.roc, colorize=T, print.cutoffs.at=c(0, 0.1, 0.9, 1.0))
+lines(x=c(0,1), y=c(0,1), col='grey')
+```
+
+```{r}
+AUC <- ROCR::performance(predob,"auc")@y.values[[1]]
+AUC
+```
+
+**Tradeoffs between TPR an FPR appear as expected in the above ROC curve. AUC = .9985069 which indicates high predictive performance across all thresholds.**
+
+```{r, echo=FALSE}
+minFNR <- threshold.stats %>% slice_min(FNR)
+ggplot(threshold.stats, aes(x=prob_threshold, y=FNR)) +
+  geom_line() +
+  geom_point(data=minFNR, color="red")
+```
+
+**We see that FNR drastically increases for thresholds above .75, further justifying our choice of threshold = .65.**
+
+### 3.2 Fit LDA Model
+
+```{r}
+#LDA (Linear Discriminant Analysis)
+lda.fit <- train(is_Blue_Tarp ~ Red + Green + Blue, data=Haiti, method="lda", trControl=ctrlspecs)
+
+lda.fit
+```
+
+```{r, echo=FALSE, include=FALSE}
+#LDA Regression statistics across different thresholds using thresholder function from the caret package. Summarize in a table. 
+threshold.stats <- thresholder(lda.fit,
+                         threshold = seq(0.05, 0.95, by = 0.05),
+                         statistics = "all")
+
+threshold.stats$FNR <- 1 - threshold.stats$Sensitivity
+threshold.stats$FPR <- 1 - threshold.stats$Specificity
+
+threshold.stats %>% 
+  select("prob_threshold", "Accuracy", "Sensitivity", "FPR", "Precision", "FNR","F1", "Balanced Accuracy", "Dist", ) %>%
+  knitr::kable(digits=3) %>%
+  kableExtra::kable_styling(full_width=FALSE)
+```
+
+**For this LDA model, we chose a threshold of .55 to maximize F1 while still maintaining high sensitivity / low FNR. We also chose this threshold to consider having a lower FPR to better utilize relief resources.**
+
+```{r, echo=FALSE}
+pred <- predict(lda.fit, Haiti, type='prob')
+predob <- ROCR::prediction(pred$Yes, Haiti$is_Blue_Tarp, label.ordering=c('No', 'Yes'))
+model.roc <- ROCR::performance(predob, measure='tpr', x.measure='fpr')
+plot(model.roc, colorize=T, print.cutoffs.at=c(0, 0.1, 0.9, 1.0))
+lines(x=c(0,1), y=c(0,1), col='grey')
+```
+
+```{r}
+AUC <- ROCR::performance(predob,"auc")@y.values[[1]]
+AUC
+```
+
+**We see a slight difference in the shape of the ROC curve for LDA compared to logistic indicating a slight loss in performance. AUC = .9888768 indicates high predictive performance across all thresholds, although this is slightly lower than logistic.**
+
+```{r, echo=FALSE}
+minFNR <- threshold.stats %>% slice_min(FNR)
+ggplot(threshold.stats, aes(x=prob_threshold, y=FNR)) +
+  geom_line() +
+  geom_point(data=minFNR, color="red")
+```
+
+**FNR steadily increases across thresholds with some larger spikes at thresholds above .60. We choose a balanced threshold of .55 to minimize FNR while also considering implications to limit FPR.**
+
+### 3.3 Fit QDA Model
+
+```{r}
+#QDA (Quadratic Discriminant Analysis)
+qda.fit <- train(is_Blue_Tarp ~ Red + Green + Blue, data=Haiti, method="qda", trControl=ctrlspecs)
+
+qda.fit
+```
+
+```{r, echo=FALSE, include=FALSE}
+#QDA Regression statistics across different thresholds using thresholder function from the caret package. Summarize in a table. 
+threshold.stats <- thresholder(qda.fit,
+                         threshold = seq(0.05, 0.95, by = 0.05),
+                         statistics = "all")
+
+threshold.stats$FNR <- 1 - threshold.stats$Sensitivity
+threshold.stats$FPR <- 1 - threshold.stats$Specificity
+
+threshold.stats %>% 
+  select("prob_threshold", "Accuracy", "Sensitivity", "FPR", "Precision", "FNR","F1", "Balanced Accuracy", "Dist",  ) %>%
+  knitr::kable(digits=3) %>%
+  kableExtra::kable_styling(full_width=FALSE)
+```
+
+**For this QDA model, we chose a threshold of .80 to maximize F1 while still maintaining high sensitivity / low FNR. We also chose this threshold to consider having a lower FPR to better utilize relief resources.**
+
+```{r, echo=FALSE}
+pred <- predict(qda.fit, Haiti, type='prob')
+predob <- ROCR::prediction(pred$Yes, Haiti$is_Blue_Tarp, label.ordering=c('No', 'Yes'))
+model.roc <- ROCR::performance(predob, measure='tpr', x.measure='fpr')
+plot(model.roc, colorize=T, print.cutoffs.at=c(0, 0.1, 0.9, 1.0))
+lines(x=c(0,1), y=c(0,1), col='grey')
+```
+
+```{r}
+AUC <- ROCR::performance(predob,"auc")@y.values[[1]]
+AUC
+```
+
+**The ROC curve shows improvement over LDA and closer to the shape of the ROC curve for logistic. AUC = .9982175 indicates high predictive performance across all thresholds.**
+
+```{r, echo=FALSE}
+minFNR <- threshold.stats %>% slice_min(FNR)
+ggplot(threshold.stats, aes(x=prob_threshold, y=FNR)) +
+  geom_line() +
+  geom_point(data=minFNR, color="red")
+```
+
+**FNR stays relatively constant but has a large increase at thresholds above .80. This further justifies our choose of a balanced threshold of .80 to minimize FNR while also considering implications to limit FPR.**
+
+### 3.4 Fit KNN Model
+
+```{r}
+#KNN (K-nearest neighbor)
+#Update with metric using sensitivity. 
+
+knn.fit <- train(is_Blue_Tarp ~ Red + Green + Blue, data=Haiti, method="knn", trControl=ctrlspecs, metric="Sens", tuneGrid = expand.grid(k = c(5, 10, 20, 251)))
+knn.fit
+#fit knn model using k = 5,10,20,251 as tuning parameters.
+```
+
+**We optimized sensitivity to find k=251 as the ideal tuning parameter through cross-validation. We chose to consider k=5,10,20 which are typical values for k, as well as k=251=sqrt(n)=sqrt(63241) which is another standard choice for k in the field of data science.** [^6]
+
+[^6]: <https://rpubs.com/Mentors_Ubiqum/tunegrid_tunelength>
+
+```{r, echo=FALSE, include=FALSE}
+#KNN statistics using k = 251 across different thresholds using thresholder function from the caret package. Summarize in a table. 
+threshold.stats <- thresholder(knn.fit,
+                         threshold = seq(0.05, 0.95, by = 0.05),
+                         statistics = "all")
+
+threshold.stats$FPR <- 1 - threshold.stats$Specificity
+threshold.stats$FNR <- 1 - threshold.stats$Sensitivity
+
+
+threshold.stats %>% 
+  select("prob_threshold", "Accuracy", "Sensitivity", "FPR", "Precision", "FNR","F1", "Balanced Accuracy", "Dist",  ) %>%
+  knitr::kable(digits=3) %>%
+  kableExtra::kable_styling(full_width=FALSE)
+```
+
+**For this KNN model, we chose a threshold of .75 to maximize F1 while still maintaining high sensitivity / low FNR. We also chose this threshold to consider having a lower FPR to better utilize relief resources.**
+
+```{r, echo=FALSE}
+pred <- predict(knn.fit, Haiti, type='prob')
+predob <- ROCR::prediction(pred$Yes, Haiti$is_Blue_Tarp, label.ordering=c('No', 'Yes'))
+model.roc <- ROCR::performance(predob, measure='tpr', x.measure='fpr')
+plot(model.roc, colorize=T, print.cutoffs.at=c(0, 0.1, 0.9, 1.0))
+lines(x=c(0,1), y=c(0,1), col='grey')
+```
+
+```{r}
+AUC <- ROCR::performance(predob,"auc")@y.values[[1]]
+AUC
+```
+
+**The ROC curve shows improvements compared to logistic, LDA, and QDA. AUC = 0.9995206 indicates high predictive performance across all thresholds.**
+
+```{r}
+minFNR <- threshold.stats %>% slice_min(FNR)
+ggplot(threshold.stats, aes(x=prob_threshold, y=FNR)) +
+  geom_line() +
+  geom_point(data=minFNR, color="red")
+```
+
+**FNR steadily increases from 0 to \~.80 and then increases drastically. This further justifies our choose of a balanced threshold of .75 to maximize F1, minimize FNR, while also considering implications to limit FPR.**
+
+### 3.5 Fit Penalized Logistic Model
+
+```{r, warnings=FALSE}
+# Penalized Logistic Regression (elastic net penalty)
+
+# Define the grid of tuning parameters to explore
+# Choose Sensitivity as deciding metric for optimal alpha/lambda combination.
+
+ctrlspecs_2 <- trainControl(method="cv", 
+                          index=myfolds, 
+                          savePredictions=TRUE,
+                          classProbs=TRUE,
+                          summaryFunction = prSummary)
+lambdas=10^seq(-4,2,0.4)
+alphas = seq(0,1,by=0.1)
+tuneGrid <- expand.grid(alpha=alphas, 
+                        lambda=lambdas)
+
+modelFit <- train(is_Blue_Tarp ~ Red + Green + Blue, 
+                  data=Haiti, 
+                  method='glmnet',
+                  metric="F",
+                  trControl=ctrlspecs_2, 
+                  tuneGrid=tuneGrid)
+```
+
+**Sensitivity does not seem to vary drastically in this model for given alpha/lambda values (usually close to 1.0). We choose our ideal alpha/lambda values by maximizing F1, which seems to vary much depending on chosen alpha/lambda. I also ran into some performance issues for this model optimizing for Sensitivity, where my model reported Sensitivity 1 across all thresholds. So we will maximize F1 score while also making considerations for Sensitivity and FPR**
+
+```{r}
+modelFit$results %>% slice_max(F)
+```
+
+```{r, echo=FALSE, include=FALSE}
+threshold.stats <- thresholder(modelFit,
+                         threshold = seq(0.05, 0.95, by = 0.05),
+                         statistics = "all")
+
+threshold.stats$FNR <- 1 - threshold.stats$Sensitivity
+threshold.stats$FPR <- 1 - threshold.stats$Specificity
+
+threshold.stats %>% 
+  select("prob_threshold", "alpha", "lambda","Accuracy", "Sensitivity", "FPR", "Precision", "FNR","F1", "Balanced Accuracy", "Dist",  ) %>%
+  knitr::kable(digits=4) %>%
+  kableExtra::kable_styling(full_width=FALSE)
+```
+
+**For this penalized logistic model, we chose a threshold of .70 to maximize F1 while still maintaining high sensitivity / low FNR. We also chose this threshold to consider having a lower FPR to better utilize relief resources.**
+
+**We choose tuning parameters of alpha = 1 and lambda = 1e-04 to maximize F1.**
+
+```{r, echo=FALSE}
+pred <- predict(modelFit, Haiti, type='prob')
+predob <- ROCR::prediction(pred$Yes, Haiti$is_Blue_Tarp, label.ordering=c('No', 'Yes'))
+model.roc <- ROCR::performance(predob, measure='tpr', x.measure='fpr')
+plot(model.roc, colorize=T, print.cutoffs.at=c(0, 0.1, 0.9, 1.0))
+lines(x=c(0,1), y=c(0,1), col='grey')
+```
+
+```{r}
+AUC <- ROCR::performance(predob,"auc")@y.values[[1]]
+AUC
+```
+
+**ROC curve is similar to logistic, LDA, QDA, but not as highly performing as KNN. AUC = 0.9984959 indicates high predictive performance across all thresholds.**
+
+```{r, echo=FALSE}
+minFNR <- threshold.stats %>% slice_min(FNR)
+ggplot(threshold.stats, aes(x=prob_threshold, y=FNR)) +
+  geom_line() +
+  geom_point(data=minFNR, color="red")
+```
+
+**FNR stays relatively constant from 0 to \~.75 and then increases drastically. This further justifies our choose of a balanced threshold of .70 to minimize FNR while also considering implications to limit FPR.**
+
+### 3.6 Random Forest Model
+
+```{r}
+#train RF + SVM models
+set.seed(55)
+
+
+#tune with 1,sqrt(p=3) => 2, and p=3 for mtry
+rf_tuneGrid <- data.frame(mtry= c(1,2,3))
+
+rf.fit <- train(is_Blue_Tarp ~ Red + Green + Blue, data=Haiti, method='rf',
+                        metric="Sens",
+                        tuneGrid = rf_tuneGrid,
+                        trControl=ctrlspecs)
+
+
+svm.poly.fit <- train(is_Blue_Tarp ~ Red + Green + Blue, data=Haiti, method='svmPoly',
+                        metric="Sens",
+                        trControl=ctrlspecs)
+
+svm.linear.fit <- train(is_Blue_Tarp ~ Red + Green + Blue, data=Haiti, method='svmLinear',
+                        metric="Sens",
+                        trControl=ctrlspecs)
+
+svm.radial.fit <- train(is_Blue_Tarp ~ Red + Green + Blue, data=Haiti, method='svmRadial',
+                        metric="Sens",
+                        trControl=ctrlspecs)
+```
+
+
+```{r, echo=FALSE, include=FALSE}
+threshold.stats <- thresholder(rf.fit,
+                         threshold = seq(0.05, 0.95, by = 0.05),
+                         statistics = "all")
+
+threshold.stats$FNR <- 1 - threshold.stats$Sensitivity
+threshold.stats$FPR <- 1 - threshold.stats$Specificity
+
+threshold.stats %>% 
+  select("prob_threshold", "Accuracy", "Sensitivity", "FPR", "Precision", "FNR","F1", "Balanced Accuracy", "Dist",  ) %>%
+  knitr::kable(digits=3) %>%
+  kableExtra::kable_styling(full_width=FALSE)
+```
+
+**For the Random Forest model, we chose a threshold of .50 to maximize F1 while still maintaining high sensitivity / low FNR. The FPR still remains relatively low at this threshold. We considered mtry = 1, mtry = sqrt(p=3) =\> 2, and mtry = p = 3 per textbook recommendations for optimizing mtry for a classification model. The model chose mtry = 1 as our ideal tuning parameter to optimize Sensitivity based on 10-fold cross validation.**
+
+```{r}
+threshold.stats %>% slice_max(F1)
+```
+
+```{r, echo=FALSE}
+pred <- predict(rf.fit, Haiti, type='prob')
+predob <- ROCR::prediction(pred$Yes, Haiti$is_Blue_Tarp, label.ordering=c('No', 'Yes'))
+model.roc <- ROCR::performance(predob, measure='tpr', x.measure='fpr')
+plot(model.roc, colorize=T, print.cutoffs.at=c(0, 0.1, 0.9, 1.0))
+lines(x=c(0,1), y=c(0,1), col='grey')
+```
+
+```{r}
+AUC <- ROCR::performance(predob,"auc")@y.values[[1]]
+AUC
+```
+
+**The ROC curve for the Random Forest model shows an improvement over logistic, LDA, QDA, KNN, and penalized logistic. AUC = 0.9999451 indicates high predictive performance across all thresholds.**
+
+```{r, echo=FALSE}
+minFNR <- threshold.stats %>% slice_min(FNR)
+ggplot(threshold.stats, aes(x=prob_threshold, y=FNR)) +
+  geom_line() +
+  geom_point(data=minFNR, color="red")
+```
+
+We can see that FNR spikes past .75. Using a prob_threshold at .50 is a compromise for a low FNR, maximizing F1 score, while also maintaining a low FPR.
+
+### 3.7 Support Vector Machines (SVM)
+
+We trained SVM models using linear, polynomial, and radial kernels using default tuning to optimize F1 and Sensitivity. We will choose the model that has the highest F1 score and continue with additional tuning. 
+
+```{r, echo=FALSE}
+threshold.stats <- thresholder(svm.linear.fit,
+                         threshold = seq(0.05, 0.95, by = 0.05),
+                         statistics = "all")
+
+threshold.stats$FNR <- 1 - threshold.stats$Sensitivity
+threshold.stats$FPR <- 1 - threshold.stats$Specificity
+```
+
+Linear:
+
+```{r}
+threshold.stats %>% slice_max(F1)
+```
+
+```{r, echo=FALSE}
+threshold.stats <- thresholder(svm.poly.fit,
+                         threshold = seq(0.05, 0.95, by = 0.05),
+                         statistics = "all")
+
+threshold.stats$FNR <- 1 - threshold.stats$Sensitivity
+threshold.stats$FPR <- 1 - threshold.stats$Specificity
+```
+
+Polynomial:
+```{r}
+threshold.stats %>% slice_max(F1)
+```
+
+```{r, echo=FALSE}
+threshold.stats <- thresholder(svm.radial.fit,
+                         threshold = seq(0.05, 0.95, by = 0.05),
+                         statistics = "all")
+
+threshold.stats$FNR <- 1 - threshold.stats$Sensitivity
+threshold.stats$FPR <- 1 - threshold.stats$Specificity
+```
+
+Radial:
+```{r}
+threshold.stats %>% slice_max(F1)
+```
+
+The radial SVM model had the highest F1 score at .998, compared to .9978 using the linear kernel and .9974 for the polynomial kernel. For the polynomial kernel, maximizing F1 comes with the disadvantage of a relatively high FPR at .136. The radial model has a higher F1, higher Sensitivity, and lower FPR than the linear model, so we will go with the radial model.
+Default model tuning used sigma = 8.733912 and C = 0.5.
+
+We will use cross-validation to consider other tuning metrics for sigma and C in the radial model.
+
+```{r}
+set.seed(7)
+svm.radial.fit_tuned <- train(is_Blue_Tarp ~ Red + Green + Blue, data=Haiti, method='svmRadial',
+                        metric="Sens",
+                        tuneGrid=expand.grid(C=c(.5, 1, 1.5, 2, 2.5, 3), sigma=c(1,5,7,8,9,10)),
+                        trControl=ctrlspecs)
+```
+
+```{r, echo=FALSE}
+threshold.stats <- thresholder(svm.radial.fit_tuned,
+                         threshold = seq(0.05, 0.95, by = 0.05),
+                         statistics = "all")
+
+threshold.stats$FNR <- 1 - threshold.stats$Sensitivity
+threshold.stats$FPR <- 1 - threshold.stats$Specificity
+
+threshold.stats %>% slice_max(F1)
+```
+
+In the tuned radial model, we see that the chosen tuning is sigma = 9 and C = 1.5. We considered values for C in .5 increments from .5 to 3, as well as sigma = 1,5,7,8,9,10. We chose these values for C because increasing C only improves performance to a limit. We also chose various sigma values close to the default to see how sigma would impact performance.
+F-1 score and Sensitivity marginally improve at the expense of a marginal loss of performance in FPR. We will go with this tuned model that optimizes F-1 score and Sensitivity at the expense of FPR.
+
+```{r, echo=FALSE, include=FALSE}
+threshold.stats %>% 
+  select("prob_threshold", "Accuracy", "Sensitivity", "FPR", "Precision", "FNR","F1", "Balanced Accuracy", "Dist",  ) %>%
+  knitr::kable(digits=3) %>%
+  kableExtra::kable_styling(full_width=FALSE)
+```
+
+We choose a threshold of .80 which maximizes F-1 score at 0.999 while maintaining a high Sensitivity at 0.999 with considerations for a lower FPR at 0.045.
+
+```{r, echo=FALSE}
+pred <- predict(svm.radial.fit_tuned, Haiti, type='prob')
+predob <- ROCR::prediction(pred$Yes, Haiti$is_Blue_Tarp, label.ordering=c('No', 'Yes'))
+model.roc <- ROCR::performance(predob, measure='tpr', x.measure='fpr')
+plot(model.roc, colorize=T, print.cutoffs.at=c(0, 0.1, 0.9, 1.0))
+lines(x=c(0,1), y=c(0,1), col='grey')
+```
+
+```{r}
+AUC <- ROCR::performance(predob,"auc")@y.values[[1]]
+AUC
+```
+
+**The ROC curve indicates a slight decrease in performance compared to the RF model. AUC = 0.9964509 indicates high predictive performance across all thresholds.**
+
+```{r, echo=FALSE}
+minFNR <- threshold.stats %>% slice_min(FNR)
+ggplot(threshold.stats, aes(x=prob_threshold, y=FNR)) +
+  geom_line() +
+  geom_point(data=minFNR, color="red")
+```
+
+FNR steadily increases as the probability threshold increases. The fitted line gets steeper after our selected threshold of .80. However, there is not a drastic difference in magnitude between FNR at higher thresholds compared to lower thresholds.
+We maximize F-1 score and Sensitivity with some considerations for maintaining a relatively low FPR.
+
+# Section 4
+
+### 4.0 Cross-Validation Performance Table
+
+```{r}
+Performance_Table <- read.csv('updated_training_perf_.csv')
+knitr::kable(Performance_Table,"pipe")
+```
+
+**See above for table of results developed through cross-validation. These results will be discussed in the Results and Conclusions section.**
+
+# Section 5: Test Holdout set
+
+See below for process used to test the holdout set with each trained model above. ROC curves for the holdout set will be plotted below and statistics will be summarized in the resulting performance table.
+
+### 5.0: Logistic
+
+
+
+```{r, warnings=FALSE, message=FALSE, echo=FALSE, include=FALSE}
+ROI_057_NON_Blue_Tarps <- read.csv("orthovnir057_ROI_NON_Blue_Tarps.txt", skip = 8, sep="", header=FALSE)
+ROI_067_Blue_Tarps <- read.csv("orthovnir067_ROI_Blue_Tarps.txt", skip = 8, sep="", header=FALSE)
+ROI_067_NOT_Blue_Tarps <- read.csv("orthovnir067_ROI_NOT_Blue_Tarps.txt", skip = 8, sep="", header=FALSE)
+ROI_069_Blue_Tarps <- read.csv("orthovnir069_ROI_Blue_Tarps.txt", skip = 8, sep="", header=FALSE)
+ROI_069_NOT_Blue_Tarps <- read.csv("orthovnir069_ROI_NOT_Blue_Tarps.txt", skip = 8, sep="", header=FALSE)
+ROI_078_Blue_Tarps <- read.csv("orthovnir078_ROI_Blue_Tarps.txt", skip = 8, sep="", header=FALSE)
+ROI_078_NON_Blue_Tarps <- read.csv("orthovnir078_ROI_NON_Blue_Tarps.txt", skip = 8, sep="", header=FALSE)
+```
+
+```{r, echo=FALSE, include=FALSE}
+#Add back in the column headers to each data set
+colnames(ROI_057_NON_Blue_Tarps) <- c("ID", "X","Y","Map X", "Map Y", "Lat", "Lon", "Red", "Green", "Blue")
+colnames(ROI_067_Blue_Tarps) <- c("ID", "X","Y","Map X", "Map Y", "Lat", "Lon", "Red", "Green", "Blue")
+colnames(ROI_067_NOT_Blue_Tarps) <- c("ID", "X","Y","Map X", "Map Y", "Lat", "Lon", "Red", "Green", "Blue")
+colnames(ROI_069_Blue_Tarps) <- c("ID", "X","Y","Map X", "Map Y", "Lat", "Lon", "Red", "Green", "Blue")
+colnames(ROI_069_NOT_Blue_Tarps) <- c("ID", "X","Y","Map X", "Map Y", "Lat", "Lon", "Red", "Green", "Blue")
+colnames(ROI_078_Blue_Tarps) <- c("ID", "X","Y","Map X", "Map Y", "Lat", "Lon", "Red", "Green", "Blue")
+colnames(ROI_078_NON_Blue_Tarps) <- c("ID", "X","Y","Map X", "Map Y", "Lat", "Lon", "Red", "Green", "Blue")
+```
+
+```{r, echo=FALSE, include=FALSE}
+#Create binary variable (pixel classified as blue tarp or not) for each dataset
+ROI_057_NON_Blue_Tarps$is_Blue_Tarp <- "No"
+ROI_057_NON_Blue_Tarps$is_Blue_Tarp <- as.factor(ROI_057_NON_Blue_Tarps$is_Blue_Tarp)
+
+ROI_067_NOT_Blue_Tarps$is_Blue_Tarp <- "No"
+ROI_067_NOT_Blue_Tarps$is_Blue_Tarp <- as.factor(ROI_067_NOT_Blue_Tarps$is_Blue_Tarp)
+
+ROI_069_NOT_Blue_Tarps$is_Blue_Tarp <- "No"
+ROI_069_NOT_Blue_Tarps$is_Blue_Tarp <- as.factor(ROI_069_NOT_Blue_Tarps$is_Blue_Tarp)
+
+ROI_078_NON_Blue_Tarps$is_Blue_Tarp <- "No"
+ROI_078_NON_Blue_Tarps$is_Blue_Tarp <- as.factor(ROI_078_NON_Blue_Tarps$is_Blue_Tarp)
+
+ROI_067_Blue_Tarps$is_Blue_Tarp <- "Yes"
+ROI_067_Blue_Tarps$is_Blue_Tarp <- as.factor(ROI_067_Blue_Tarps$is_Blue_Tarp)
+
+ROI_069_Blue_Tarps$is_Blue_Tarp <- "Yes"
+ROI_069_Blue_Tarps$is_Blue_Tarp <- as.factor(ROI_069_Blue_Tarps$is_Blue_Tarp)
+
+ROI_078_Blue_Tarps$is_Blue_Tarp <- "Yes"
+ROI_078_Blue_Tarps$is_Blue_Tarp <- as.factor(ROI_078_Blue_Tarps$is_Blue_Tarp)
+```
+
+```{r, echo=FALSE, include=FALSE}
+#Remove ID column before bind rows
+ROI_057_NON_Blue_Tarps <- ROI_057_NON_Blue_Tarps %>% select(-c(ID))
+ROI_067_NOT_Blue_Tarps <- ROI_067_NOT_Blue_Tarps %>% select(-c(ID))
+ROI_069_NOT_Blue_Tarps <- ROI_069_NOT_Blue_Tarps %>% select(-c(ID))
+ROI_078_NON_Blue_Tarps <- ROI_078_NON_Blue_Tarps %>% select(-c(ID))
+ROI_067_Blue_Tarps <- ROI_067_Blue_Tarps %>% select(-c(ID))
+ROI_069_Blue_Tarps <- ROI_069_Blue_Tarps %>% select(-c(ID))
+ROI_078_Blue_Tarps <- ROI_078_Blue_Tarps %>% select(-c(ID))
+```
+
+```{r, echo=FALSE, include=FALSE}
+holdout_data <- rbind(ROI_057_NON_Blue_Tarps,ROI_067_NOT_Blue_Tarps,ROI_069_NOT_Blue_Tarps,ROI_078_NON_Blue_Tarps,
+                      ROI_067_Blue_Tarps, ROI_069_Blue_Tarps, ROI_078_Blue_Tarps)
+```
+
+```{r, include=FALSE}
+holdout_data$prob <- predict(glm.fit, newdata = holdout_data, type = "prob")[, "Yes"]
+threshold_glm <- .65
+holdout_data$pred <- as.factor(ifelse(holdout_data$prob >= threshold_glm, "Yes", "No"))
+```
+
+```{r, include=FALSE}
+confusion_mat <- confusionMatrix(holdout_data$pred, holdout_data$is_Blue_Tarp, positive='Yes')
+F1 <- confusion_mat$byClass["F1"]
+Accuracy <- confusion_mat$overall["Accuracy"]
+TPR <- confusion_mat$byClass["Sensitivity"]
+FPR <- 1-confusion_mat$byClass[["Specificity"]]
+Precision <- confusion_mat$byClass["Precision"]
+glm.auc <- auc(holdout_data$is_Blue_Tarp, holdout_data$prob)
+```
+
+```{r, echo=FALSE, include=FALSE}
+contrasts(holdout_data$is_Blue_Tarp)
+```
+
+```{r, echo=FALSE, include=FALSE}
+confusion_mat
+```
+
+```{r, echo=FALSE, include=FALSE}
+F1
+Accuracy
+TPR
+FPR
+Precision
+glm.auc
+```
+
+```{r}
+predob <- ROCR::prediction(holdout_data$prob, holdout_data$is_Blue_Tarp)
+model.roc <- ROCR::performance(predob, measure='tpr', x.measure='fpr')
+plot(model.roc, downsampling=0.001, colorize=T, print.cutoffs.at=c(0, 0.1, 0.9, 1.0))
+lines(x=c(0,1), y=c(0,1), col='grey')
+```
+
+```{r}
+glm.auc
+```
+The ROC curve is shaped well and AUC = 0.9994 indicating strong performance. 
+
+### 5.1: LDA
+
+```{r, echo=FALSE, include=FALSE}
+holdout_data <- rbind(ROI_057_NON_Blue_Tarps,ROI_067_NOT_Blue_Tarps,ROI_069_NOT_Blue_Tarps,ROI_078_NON_Blue_Tarps,
+                      ROI_067_Blue_Tarps, ROI_069_Blue_Tarps, ROI_078_Blue_Tarps)
+```
+
+```{r, include=FALSE}
+holdout_data$prob <- predict(lda.fit, newdata = holdout_data, type = "prob")[, "Yes"]
+threshold_lda <- .55
+holdout_data$pred <- as.factor(ifelse(holdout_data$prob >= threshold_lda, "Yes", "No"))
+```
+
+```{r, include=FALSE}
+confusion_mat <- confusionMatrix(holdout_data$pred, holdout_data$is_Blue_Tarp, positive='Yes')
+F1 <- confusion_mat$byClass["F1"]
+Accuracy <- confusion_mat$overall["Accuracy"]
+TPR <- confusion_mat$byClass["Sensitivity"]
+FPR <- 1-confusion_mat$byClass[["Specificity"]]
+Precision <- confusion_mat$byClass["Precision"]
+lda.auc <- auc(holdout_data$is_Blue_Tarp, holdout_data$prob)
+```
+
+```{r, echo=FALSE, include=FALSE}
+F1
+Accuracy
+TPR
+FPR
+Precision
+lda.auc
+```
+
+```{r}
+predob <- ROCR::prediction(holdout_data$prob, holdout_data$is_Blue_Tarp)
+model.roc <- ROCR::performance(predob, measure='tpr', x.measure='fpr')
+plot(model.roc, downsampling=0.001, colorize=T, print.cutoffs.at=c(0, 0.1, 0.9, 1.0))
+lines(x=c(0,1), y=c(0,1), col='grey')
+```
+
+```{r}
+lda.auc
+```
+We can see above that there is a dip in the ROC curve indicating a drop in performance on the holdout set using LDA vs. logistic regression. AUC = .9921 which is slightly lower than logistic.
+
+### 5.2: QDA
+
+```{r, echo=FALSE, include=FALSE}
+holdout_data <- rbind(ROI_057_NON_Blue_Tarps,ROI_067_NOT_Blue_Tarps,ROI_069_NOT_Blue_Tarps,ROI_078_NON_Blue_Tarps,
+                      ROI_067_Blue_Tarps, ROI_069_Blue_Tarps, ROI_078_Blue_Tarps)
+```
+
+```{r, include=FALSE}
+holdout_data$prob <- predict(qda.fit, newdata = holdout_data, type = "prob")[, "Yes"]
+threshold_qda <- .80
+holdout_data$pred <- as.factor(ifelse(holdout_data$prob >= threshold_qda, "Yes", "No"))
+```
+
+```{r, include=FALSE}
+confusion_mat <- confusionMatrix(holdout_data$pred, holdout_data$is_Blue_Tarp, positive='Yes')
+F1 <- confusion_mat$byClass["F1"]
+Accuracy <- confusion_mat$overall["Accuracy"]
+TPR <- confusion_mat$byClass["Sensitivity"]
+FPR <- 1-confusion_mat$byClass[["Specificity"]]
+Precision <- confusion_mat$byClass["Precision"]
+qda.auc <- auc(holdout_data$is_Blue_Tarp, holdout_data$prob)
+```
+
+```{r, echo=FALSE, include=FALSE}
+F1
+Accuracy
+TPR
+FPR
+Precision
+qda.auc
+```
+
+```{r, echo=FALSE}
+predob <- ROCR::prediction(holdout_data$prob, holdout_data$is_Blue_Tarp)
+model.roc <- ROCR::performance(predob, measure='tpr', x.measure='fpr')
+plot(model.roc, downsampling=0.001, colorize=T, print.cutoffs.at=c(0, 0.1, 0.9, 1.0))
+lines(x=c(0,1), y=c(0,1), col='grey')
+```
+
+```{r}
+qda.auc
+```
+The QDA ROC curve shows a slight drop in performance compared to both LDA and logistic. AUC decreases slightly to .9915, but this is still indicative of strong performance.
+
+### 5.3: KNN
+
+```{r, echo=FALSE, include=FALSE}
+holdout_data <- rbind(ROI_057_NON_Blue_Tarps,ROI_067_NOT_Blue_Tarps,ROI_069_NOT_Blue_Tarps,ROI_078_NON_Blue_Tarps,
+                      ROI_067_Blue_Tarps, ROI_069_Blue_Tarps, ROI_078_Blue_Tarps)
+```
+
+```{r, include=FALSE}
+holdout_data$prob <- predict(knn.fit, newdata = holdout_data, type = "prob")[, "Yes"]
+threshold_knn <- .75
+holdout_data$pred <- as.factor(ifelse(holdout_data$prob >= threshold_knn, "Yes", "No"))
+```
+
+```{r, include=FALSE}
+confusion_mat <- confusionMatrix(holdout_data$pred, holdout_data$is_Blue_Tarp, positive='Yes')
+F1 <- confusion_mat$byClass["F1"]
+Accuracy <- confusion_mat$overall["Accuracy"]
+TPR <- confusion_mat$byClass["Sensitivity"]
+FPR <- 1-confusion_mat$byClass[["Specificity"]]
+Precision <- confusion_mat$byClass["Precision"]
+knn.auc <- auc(holdout_data$is_Blue_Tarp, holdout_data$prob)
+```
+
+```{r, echo=FALSE, include=FALSE}
+F1
+Accuracy
+TPR
+FPR
+Precision
+knn.auc
+```
+
+```{r, echo=FALSE}
+predob <- ROCR::prediction(holdout_data$prob, holdout_data$is_Blue_Tarp)
+model.roc <- ROCR::performance(predob, measure='tpr', x.measure='fpr')
+plot(model.roc, downsampling=0.01, colorize=T, print.cutoffs.at=c(0, 0.1, 0.9, 1.0))
+lines(x=c(0,1), y=c(0,1), col='grey')
+```
+
+```{r}
+knn.auc
+```
+Per the above ROC curve, we see that the KNN model performed slightly worse than the previous models on the holdout set. AUC = .9609 which indicates a potential loss in performance. 
+
+### 5.4: Penalized Logistic
+
+```{r, echo=FALSE, include=FALSE}
+holdout_data <- rbind(ROI_057_NON_Blue_Tarps,ROI_067_NOT_Blue_Tarps,ROI_069_NOT_Blue_Tarps,ROI_078_NON_Blue_Tarps,
+                      ROI_067_Blue_Tarps, ROI_069_Blue_Tarps, ROI_078_Blue_Tarps)
+```
+
+```{r, include=FALSE}
+holdout_data$prob <- predict(modelFit, newdata = holdout_data, type = "prob")[, "Yes"]
+threshold_penalized_logistic <- .70
+holdout_data$pred <- as.factor(ifelse(holdout_data$prob >= threshold_penalized_logistic, "Yes", "No"))
+```
+
+```{r, include=FALSE}
+confusion_mat <- confusionMatrix(holdout_data$pred, holdout_data$is_Blue_Tarp, positive='Yes')
+F1 <- confusion_mat$byClass["F1"]
+Accuracy <- confusion_mat$overall["Accuracy"]
+TPR <- confusion_mat$byClass["Sensitivity"]
+FPR <- 1-confusion_mat$byClass[["Specificity"]]
+Precision <- confusion_mat$byClass["Precision"]
+penalized_logistic.auc <- auc(holdout_data$is_Blue_Tarp, holdout_data$prob)
+```
+
+```{r, echo=FALSE,include=FALSE}
+F1
+Accuracy
+TPR
+FPR
+Precision
+penalized_logistic.auc
+```
+
+```{r, echo=FALSE}
+predob <- ROCR::prediction(holdout_data$prob, holdout_data$is_Blue_Tarp)
+model.roc <- ROCR::performance(predob, measure='tpr', x.measure='fpr')
+plot(model.roc, downsampling=0.001, colorize=T, print.cutoffs.at=c(0, 0.1, 0.9, 1.0))
+lines(x=c(0,1), y=c(0,1), col='grey')
+```
+
+```{r}
+penalized_logistic.auc
+```
+The above ROC curve shows an increase in performance compared to all prior models. We see that AUC = .9996 which indicates strong predictive performance of penalized logistic on the holdout set.
+
+### 5.5: Random Forest
+
+```{r, echo=FALSE, include=FALSE}
+holdout_data <- rbind(ROI_057_NON_Blue_Tarps,ROI_067_NOT_Blue_Tarps,ROI_069_NOT_Blue_Tarps,ROI_078_NON_Blue_Tarps,
+                      ROI_067_Blue_Tarps, ROI_069_Blue_Tarps, ROI_078_Blue_Tarps)
+```
+
+```{r, include=FALSE}
+holdout_data$prob <- predict(rf.fit, newdata = holdout_data, type = "prob")[, "Yes"]
+threshold_rf <- .50
+holdout_data$pred <- as.factor(ifelse(holdout_data$prob >= threshold_rf, "Yes", "No"))
+```
+
+```{r, include=FALSE}
+confusion_mat <- confusionMatrix(holdout_data$pred, holdout_data$is_Blue_Tarp, positive='Yes')
+F1 <- confusion_mat$byClass["F1"]
+Accuracy <- confusion_mat$overall["Accuracy"]
+TPR <- confusion_mat$byClass["Sensitivity"]
+FPR <- 1-confusion_mat$byClass[["Specificity"]]
+Precision <- confusion_mat$byClass["Precision"]
+rf.auc <- auc(holdout_data$is_Blue_Tarp, holdout_data$prob)
+```
+
+```{r, echo=FALSE, include=FALSE}
+F1
+Accuracy
+TPR
+FPR
+Precision
+rf.auc
+```
+
+```{r, echo=FALSE}
+predob <- ROCR::prediction(holdout_data$prob, holdout_data$is_Blue_Tarp)
+model.roc <- ROCR::performance(predob, measure='tpr', x.measure='fpr')
+plot(model.roc, downsampling=0.01, colorize=T, print.cutoffs.at=c(0, 0.1, 0.9, 1.0))
+lines(x=c(0,1), y=c(0,1), col='grey')
+```
+
+```{r}
+rf.auc
+```
+The above ROC curve and AUC = .9823 suggest a drop in performance on the holdout set compared to penalized logistic results.
+
+### 5.6: Support Vector Machine (SVM) - Radial Kernel
+
+```{r, echo=FALSE, include=FALSE}
+holdout_data <- rbind(ROI_057_NON_Blue_Tarps,ROI_067_NOT_Blue_Tarps,ROI_069_NOT_Blue_Tarps,ROI_078_NON_Blue_Tarps,
+                      ROI_067_Blue_Tarps, ROI_069_Blue_Tarps, ROI_078_Blue_Tarps)
+```
+
+```{r, include=FALSE}
+holdout_data$prob <- predict(svm.radial.fit_tuned, newdata = holdout_data, type = "prob")[, "Yes"]
+threshold_svm <- .80
+holdout_data$pred <- as.factor(ifelse(holdout_data$prob >= threshold_svm, "Yes", "No"))
+```
+
+```{r, include=FALSE}
+confusion_mat <- confusionMatrix(holdout_data$pred, holdout_data$is_Blue_Tarp, positive='Yes')
+F1 <- confusion_mat$byClass["F1"]
+Accuracy <- confusion_mat$overall["Accuracy"]
+TPR <- confusion_mat$byClass["Sensitivity"]
+FPR <- 1-confusion_mat$byClass[["Specificity"]]
+Precision <- confusion_mat$byClass["Precision"]
+svm.auc <- auc(holdout_data$is_Blue_Tarp, holdout_data$prob)
+```
+
+```{r, echo=FALSE, include=FALSE}
+F1
+Accuracy
+TPR
+FPR
+Precision
+svm.auc
+```
+
+```{r, echo=FALSE}
+predob <- ROCR::prediction(holdout_data$prob, holdout_data$is_Blue_Tarp)
+model.roc <- ROCR::performance(predob, measure='tpr', x.measure='fpr')
+plot(model.roc, downsampling=0.001, colorize=T, print.cutoffs.at=c(0, 0.1, 0.9, 1.0))
+lines(x=c(0,1), y=c(0,1), col='grey')
+```
+
+```{r}
+svm.auc
+```
+Per the above ROC curve and AUC, we see a decrease in performance compared to other models. However, this model may outperform KNN. 
+
+```{r, echo=FALSE, include=FALSE}
+stopCluster(cl)
+registerDoSEQ()
+```
+
+# Section 6: Results
+
+Cross-validated training results:
+
+```{r}
+Performance_Table <- read.csv('updated_training_perf_.csv')
+knitr::kable(Performance_Table,format="pipe")
+```
+
+Holdout set performance results:
+
+```{r, echo=FALSE}
+Holdout_Test_Results <- read.csv('holdout_set_performance.csv')
+knitr::kable(Holdout_Test_Results,"pipe")
+```
+
+
+
+ 
+
+# Section 7: Conclusions
+
+### 7.1.0: Determination and justification of which algorithm works best (cross-validation/training data)
+
+Per the above, we created a tables using the optimal threshold and tuning parameters (if applicable) to best predict Blue Tarp status. In general, we chose parameters/thresholds to maximize F1, a balanced statistic, as well as maximizing sensitivity / minimizing FNR to ensure we are fully capturing possible blue tarp locations.
+
+We first review the cross-validated training results. The Random Forest model has the highest AUC at .9999 and LDA has the lowest at .9888, although every model trained generally has high AUC. In order to maximize F1 and Sensitivity, we considered a large range of thresholds across the models, with SVM and QDA having high thresholds at .80 and Random Forest having the lowest chosen threshold at .50. In general, lower thresholds are more lenient in classifying RGB values as Blue Tarp pixels, which results in a higher sensitivity at the cost of a higher false positive rate. Our overall goal was to maximize F1 and Sensitivity, so I didn't always choose the lowest thresholds because we made some considerations to limit the FPR. This makes sense in the disaster relief scenario because we want to capture as many positive cases as possible while remaining realistic.
+
+In the training results, we see that the Random Forest model and SVM model using the radial kernel have the highest F-1 scores across all results, as well as some of the lowest FPR. Random Forest and SVM are also on the high end for TPR/Specificity at .999 while maintaining high precision at .998 and accuracy at .997. In choosing between these two, I go with the Random Forest model because it has a higher AUC at the expense of a slightly higher FPR than the SVM model. This should improve model performance at the expense of some relief resources spent on false positives. So we maintain strong predictive performance using Random Forest and still maintain relatively low FPR compared to the other models.
+
+I am not surprised that Random Forest yields the best cross-validation results compared to the other models. We learned in Module 11 that random forest classifiers are most likely to be high performs (at least when testing for Accuracy) compared to many other common algorithms. Likewise, based on our exploratory data analysis, the true relationship between the predictors and the response is likely different than the assumed relationships using Logistic, LDA, and QDA. We also know from class that Random Forest / bootstrapping should work well with a significant amount of training data (i.e., 63,241 observations).
+
+### 7.1.1: Determination and justification of which algorithm works best (holdout data)
+
+There is more noticeable variation between the result statistics in the holdout data results compared to the training data results. F1 score, Accuracy, and Precision seem to vary drastically depending on the chosen model. AUC still remains high across the board, although slightly lower than AUC observed during training. FPR actually improved using the holdout data compared to the training statistics. 
+
+We will continue to use the same logic of choosing the preferred model based on maximizing F1 score and Sensitivity. Using this logic, the holdout data results have a more clear winner: we choose the Penalized Logistic model (alpha = 1, lambda = 1e04) which has by far the highest F1 score at .836 as well as one of the highest Sensitivity at .977 (second only to logistic which has a Sensitivity of .985). The Penalized Logistic model also low FPR (only outperformed slightly by KNN and QDA), which will be useful in capturing as many positive cases as possible with a relatively low false positive rate to save critical relief sources.
+
+Some models performed more poorly than expected on the holdout data. For example, LDA and SVM using the radial kernel had low F1 scores and precision (.398, .326; .261, .339, respectively). LDA is making a larger amount of false positive predictions with the highest FPR of all models at .0170. In contrast, SVM seems to be making a larger amount of false negative predictions with the lowest Sensitivity of all models at .314. These reasons drive the loss in F1 score for both LDA and SVM, although Accuracy remains high for both by predicting the majority class correctly. 
+
+### 7.2: Discussion justifying why findings are compatible or reconcilable. 
+
+We see some stark differences in results for the holdout set compared to results for the training set, particularly in Precision, TPR and F1, which is concerning because we trained our models and chose thresholds to optimize F1 and TPR. However, our findings are generally compatible/reconcilable because AUC remains very high performing for both the training results and the holdout results. AUC is a threshold invariant metric, meaning our choice of threshold does not change AUC. AUC is also a reliable metric during class imbalance situations (discussed more below), so it is a good sign that our AUC is high performing for all models in both the training and the holdout sets. 
+[^10]
+
+[^10]: https://developers.google.com/machine-learning/crash-course/classification/roc-and-auc#:~:text=AUC%20is%20scale%2Dinvariant.,what%20classification%20threshold%20is%20chosen.
+
+The differences in training and holdout results may be explained in part by the differences in the distributions of the training and test data. During EDA, we saw that the training data uses higher intensity RGB values than our test data, which may have lead to some loss in performance in the holdout test results. We may see more compatible/reconcilable results if we use training/test sets that have more similar distributions.
+
+### 7.3: Recommendation/rationale regarding optimal algorithm to use for detection of blue tarps
+
+As discussed above, I ultimately would recommend using the penalized logistic regression algorithm in this context. Penalized logistic regression seemed to perform quite well across all metrics for both our training and test results. In particular, the penalized logistic regression model had the highest AUC and F1 score in the holdout results with the second highest TPR (only slightly below typical logistic regression) while maintaining a low FPR in both the training and test results. This shows high compatability between the training and holdout results, which gives me more confidence in using this algorithm for detection of blue tarps. Moreover, the high AUC for this model in both the training and test results makes it clear to me that it will be useful regardless of our choice of thresholding. 
+
+### 7.4: Discussion of the relevance of the metrics calculated above to this application context
+
+In training, thresholding, and choosing an optimal model, we optimized for both F1 score and Sensitivity. F1 score is a useful middle-of-the-ground metric to assess model performance in an imbalanced classification context. Likewise, we want to also prioritize TPR/Sensitivity because we want to ensure we side more on identifying possible blue tarp pixels to keep the FNR low to save more lives. While this comes at the expense of a potentially higher FPR (i.e., wasting relief resources), this model gives a good balance between the two to ensure efficient use of resources. 
+
+Other metrics considered include Accuracy and Precision. Accuracy is less useful in this application context because simple models that predict just the majority class will likely have high Accuracy because blue tarp pixels are quite rare in comparison to the non blue tarp pixels (the majority class). Precision is a measure of the accuracy of positive predictions, which is also less relevant in this context because we less concerned with minimizing false positives (we would rather be more lenient in identifying blue tarps so we ensure we are not missing any displaced persons).
+
+### 7.5: Challenges with Imbalanced Classification
+
+Although we have touched on the issue of imbalanced classification in earlier sections, we will add some additional detail on conclusions here. Because Blue Tarp is identified in only \~3% of total training observations, we have a large skew in the data between the majority ("No" is not Blue Tarp) and minority ("Yes" is Blue Tarp) classes. This makes threshold and model selection more difficult as some commonly used statistics (i.e., Accuracy) become less reliable. As discussed in the additional resources on Canvas, the imbalanced classification issue further stresses the importance of sensitivity and specificity in the context of this project. Because we are primarily concerned with limiting the FNR to avoid missing potentially displaced persons, we focus more on sensitivity than specificity. Given this context, misclassifying an observation from the majority class (false positive) is less critical than misclassifying an observation from the minority class (false negative).
+[^7]
+
+[^7]: <https://machinelearningmastery.com/imbalanced-classification-is-hard/>
+
+There are additional techniques we might use to improve results like random resampling to create a more balanced class distribution for our training models. We can use random oversampling (randomly create duplicates observations of the minority class) or random undersampling (randomly remove observations in the majority class) or a combination of the two to address the severe skew in the class distribution. This may lead to models with better predictive power and eventual improvements in holdout test results.
+[^11]
+
+[^11]: https://machinelearningmastery.com/random-oversampling-and-undersampling-for-imbalanced-classification/
+
+### 7.6: Limitations of using RGB data for classification
+
+RGB data are "sensitive to illuminations and shadows" and "cannot provide accurate representations of the shape of objects." This may have skewed our classifications and may have had eventual ramifications on the predictive performance on the holdout data. Improvements to the data collection process may make use of more advanced 3D object representation approaches which may yield better performance for predictive modeling (i.e., RGB-D including depth as a feature).
+[^9]
+
+[^9]: <https://link.springer.com/article/10.1007/s11370-021-00349-8#>:\~:text=Object%20representations%20based%20on%20just,of%20the%20shape%20of%20objects.
+
+Using solely RGB values, we fail to capture potentially critical spatial information like depth that may improve classification accuracy and overall performance. Compared to RGB images, depth images are "robust to the variations in color, illumination, rotation angle and scale" which may have skewed training in our models. We are not given any detail on any of the image preprocessing techniques used by the researchers who developed the holdout data which may have had an averse effect on our models' predictive power during testing. The provided example images from which the holdout data was derived show potential differences in altitude and shadowing from the local environment that are not fully considered when we only train models using RGB/color as predictors. Moreover, creating transformations or additional features using our raw RGB data is not intuitive unless you have some additional insight or training into image processing. In the context of our project, transformations or feature engineering using the existing RGB data likely lack contextual justification other than this appeared to improve model performance after guess and check. 
+[^8]
+
+
+[^8]: https://www.sciencedirect.com/science/article/abs/pii/S0020025517300191
+
+# Section 8: Resources & References

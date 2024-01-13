@@ -1,0 +1,8 @@
+﻿Model,Tuning Parameters,AUC,Selected threshold,F1,Accuracy,TPR,FPR,Precision
+Logistic,NA,0.9994,0.65,0.701,0.701,0.985,0.006,0.544
+LDA,NA,0.9921,0.55,0.398,0.982,0.832,0.017,0.261
+QDA,NA,0.9915,0.8,0.711,0.711,0.637,0.001,0.804
+KNN,k=251,0.9609,0.75,0.701,0.996,0.582,0.0005,0.882
+Penalized Logistic,"alpha = 1, lambda = 1e-04",0.9996,0.7,0.836,0.997,0.977,0.003,0.73
+Random Forest,mtry = 1,0.9823,0.5,0.68,0.995,0.775,0.004,0.605
+SVM (radial kernel),"sigma = 9, C = 1.5",0.979,0.8,0.326,0.991,0.314,0.004,0.339
